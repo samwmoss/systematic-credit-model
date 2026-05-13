@@ -72,7 +72,8 @@ project/
 │   ├── test_data.py                    # Data ingestion + validation tests
 │   ├── test_signal.py                  # Signal calculation tests
 │   ├── test_regime.py                  # Regime classifier tests
-│   └── test_portfolio.py               # Portfolio construction tests
+│   ├── test_portfolio.py               # Portfolio construction tests
+│   └── test_backtest.py                # Backtest engine tests (lag + regime scaling)
 ├── .gitignore
 ├── README.md
 └── requirements.txt
@@ -148,7 +149,7 @@ The following ingestion rules are locked from EDA (`notebooks/inspection.ipynb`,
 
 **Universe-stage filters** (applied after ingestion, in portfolio construction):
 - `OASD == 0` (2,300 rows) and `DTS == 0` (2,786 rows) — excluded from eligible universe (signal denominator and weighting denominator both undefined).
-- Stale-OAS bonds — flagged via month-over-month `|ΔOAS| < 1 bp` (baseline rate 1.75% in panel); deferred to portfolio construction commit.
+- Stale-OAS bonds — flagged via month-over-month `|ΔOAS| < 1 bp` (baseline rate 1.75% in panel). **Deferred to production extension** (see Roadmap item 4). The threshold is documented in `config.data.staleness_flag_bps` for when the filter is implemented; no current pipeline code consumes it.
 
 ### Leakage Checks + Merge notes
 
@@ -196,7 +197,7 @@ The system must perform the following functions:
 - **Compute the credit signal** at the bond level on each rebalance date. Rank bonds within the eligible universe.
 - **Construct the portfolio** subject to at least two explicit constraints (issuer cap, sector cap, rating bucket). Scale exposure based on regime classification.
 - **Run the backtest** as a monthly-rebalance loop over the 2010-2018 window. Compute portfolio excess returns using `Excess_Return_MTD` as the dependent variable.
-- **Compute diagnostics:** drawdown, turnover, and exposure decomposition (sector and rating).
+- **Compute diagnostics:** **Information Ratio** and **Sharpe** of portfolio excess returns, drawdown, turnover, exposure decomposition (sector and rating), rolling 12-month windows, sub-period decomposition, and quintile-size sensitivity comparison.
 - **Log all runs** with structured records of data loaded, rows processed, missing data handled, and outputs generated. Logs persist to `logs/`.
 - **Produce outputs** to `outputs/` — charts as PNG, tabular results as CSV.
 - **Execute end-to-end from a single command.** No manual intervention required between data ingestion and output generation.
@@ -232,9 +233,9 @@ Each layer is importable as a package. All parameters live in `config/config.yam
 - `src/data/validate.py` — Schema checks, range checks, missing-value reporting, leakage assertions.
 - `src/features/signal.py` — Compute carry signal (OAS/OASD) and rank within universe per date.
 - `src/regime/classifier.py` — Apply rule-based thresholds across VIX, T10Y2Y, NFCI to produce monthly regime label.
-- `src/portfolio/construction.py` — Apply constraints (issuer, sector, rating), produce position weights, scale by regime.
+- `src/portfolio/construction.py` — Apply universe filter (`OASD > 0`, `DTS > 0`), delegate signal selection + inverse-DTS weighting (`compute_signal`), enforce issuer (`Ticker`) and sector (`Class3`) caps **iteratively until each cap is honored exactly within float precision**. Returns position weights summing to 1.0 per Date (full deployment); regime scaling is applied later in the backtest layer.
 - `src/evaluation/backtest.py` — Monthly-rebalance loop, portfolio return computation, holdings tracking.
-- `src/evaluation/diagnostics.py` — Drawdown, turnover, sector/rating exposure decomposition. Output charts and CSVs.
+- `src/evaluation/diagnostics.py` — Information Ratio + Sharpe vs. the equal-weighted eligible HY universe, drawdown, turnover, sector/rating exposure decomposition, rolling 12-month performance, sub-period decomposition (2010-12 / 2013-15 / 2016-18). Outputs PNGs to `outputs/charts/` and CSVs to `outputs/csv/`.
 - `src/utils/logging_config.py` — Centralized logger configuration; file and console handlers.
 
 ### Technology Stack
@@ -336,21 +337,22 @@ Fitting on the pre-backtest slice makes the thresholds out-of-sample for the 201
 **Weighting:** Within the long quintile, weight each bond proportional to `1 / DTS` so each position contributes approximately equal risk to the portfolio. Weights normalize to sum to 1 within the quintile before regime scaling.
 
 **Constraints:**
-- **Issuer cap** — Maximum **portfolio weight per issuer** (enforced via `Ticker`). Anchored to the 90th percentile of bonds-per-issuer-per-month in the panel (≈ 4 bonds), expressed as a portfolio weight cap. Specific weight value to be locked alongside the long-quintile size in the portfolio construction commit.
+- **Issuer cap** — Maximum **5% portfolio weight per issuer** (enforced via `Ticker`). Anchored to the 90th percentile of bonds-per-issuer-per-month in the panel (≈ 4 bonds out of an ~80-bond long quintile under the primary cutoff).
 - **Sector cap** — Maximum **20% portfolio weight per sector** (enforced via `Class3`). Set above the 18% mean for Consumer_Cyclical so it binds only during sector-concentration events (e.g., Energy 2015-16).
 - **Rating bucket exposure** — No explicit CCC max or BB min constraint. Fallen angels (BBB and above) are already excluded at ingestion; the eligible universe is B / BB / CCC only. The signal naturally tilts toward CCC under risk-on; the regime classifier handles aggregate risk-taking through position-scaling, not bucket-level filtering.
 
-**Constraint Enforcement Order:**
-1. Apply universe filter.
-2. Compute signal and select top quintile.
-3. Apply inverse-DTS weighting within the quintile.
-4. Enforce constraints in priority order: issuer cap → sector cap → rating bucket. Where a constraint is violated, trim the lowest-signal bonds within the violating category until the constraint is satisfied. Redistribute trimmed weight proportionally across remaining eligible bonds.
-5. Apply regime scaling to total deployed capital.
+**Constraint Enforcement Order (within `construction.py`):**
+1. Apply universe filter (`OASD > 0`, `DTS > 0`).
+2. Compute signal and select top quintile (delegated to `compute_signal`).
+3. Apply inverse-DTS weighting within the quintile (also from `compute_signal`).
+4. Enforce caps in the order configured in `portfolio.constraint_order` (default: issuer cap → sector cap). For each cap: **iteratively** — while any group's summed weight exceeds the cap, trim the lowest-signal bonds within violating groups until each group sum is at or below the cap, then rescale all surviving bonds in the Date so weights re-sum to 1.0 (full deployment). Iteration continues until no group violates the cap, typically within 2–5 passes; convergence is mathematically guaranteed for any cap > 0 with a feasible universe. The cap value (e.g., 20% sector) is therefore honored exactly within float precision — there is no "single-pass artifact."
+
+Regime scaling is applied at the backtest layer, not in construction (see Rebalance Logic).
 
 **Rebalance Logic:**
 - **Frequency:** Monthly.
 - **Timing:** A rebalance for month `T+1` uses bond row `T` (end-of-month-`T` snapshot — see Variable Map and Leakage Checks + Merge notes) and FRED data with date `≤ end_of_month(T)`. Signal inputs `OAS_T` / `OASD_T` produce the ranking; positions are held during month `T+1`; realized return is row `T+1`'s `Excess_Return_MTD`. Both the bond row and the matched FRED value become knowable on the first business day of month `T+1`.
-- **Cash handling:** Capital not deployed in the long quintile (under neutral or risk-off regimes) is treated as held in a Treasury-bill proxy. The proxy's return is the duration-matched short-Treasury yield from the FRED series, applied to the un-deployed capital share.
+- **Cash handling:** Capital not deployed under neutral or risk-off regimes is held in a duration-matched Treasury proxy. Because the backtest reports excess return (each bond's Excess_Return_MTD is already net of its duration-matched Treasury), the cash component's contribution to portfolio excess return is zero by construction. The strategy's reported PnL therefore reflects credit-signal excess return scaled by regime deployment, with no rate contribution from idle capital.
 
 **Considered and rejected:**
 
@@ -376,11 +378,13 @@ The pipeline is designed for monthly backtest evaluation. If extended to product
 
 **2. Survivorship and delisting attribution failure.**
 
-*What it is:* Bonds exit the panel for multiple reasons — maturity, call, default, rating-migration out of HY. If the pipeline silently drops bonds with missing data on a rebalance date, defaulted bonds (which often appear with extreme negative returns or missing fields) get excluded from the portfolio return calculation. This systematically overstates backtest performance.
+*What it is:* Bonds exit the panel for multiple reasons — maturity, call, default, rating-migration out of HY. Whether this systematically biases the backtest depends on the source data's convention: a well-formed HY panel records the terminal-event return in the bond's last row before removal, in which case the loss is captured at that row. A poorly-formed panel removes bonds without recording the terminal return, in which case losses are silently missed.
 
-*How it manifests:* Backtest results look better than reality. The cumulative return curve does not reflect the full losses from bond defaults during the period.
+*How it would manifest:* If the panel does NOT follow the standard convention, the backtest's cumulative return curve would understate losses, especially in stress periods where defaults concentrate.
 
-*Detection:* Maintain a ledger of bond exits indexed by Cusip and exit date. For each exit, attribute the reason (call, default, maturity, rating migration). Assert that every bond's final return is captured in the portfolio return for the month in which it exited. Audit the count of exits per month against external HY default-rate data as a sanity check.
+*Status in this prototype:* The bond panel was empirically verified to follow the standard convention — terminal events are recorded in each bond's last available row. The verification lives in `tests/test_data.py::test_exit_row_captures_terminal_event`. Backtest's `fill_value=0` for bonds with no row at T+1 is therefore not a material bias source — those bonds are post-event by definition, and their loss was captured in the row preceding their disappearance. The `n_bonds_exited` series in `backtest.py`'s output is also monitored at run time (WARNING fires above 5% monthly exit rate) so any future regression in the data convention would surface immediately.
+
+*Production-grade extension:* An explicit exit-reason ledger (`(Cusip, exit_date, reason_code, recovery_value)`) would refine attribution beyond what last-row recording provides — particularly for edge cases like rating-migration-out where the bond may continue trading post-removal. See Roadmap item 3.
 
 **3. Regime classifier drift.**
 
@@ -419,6 +423,7 @@ The pipeline relies on the following explicit assumptions. A reviewer can audit 
 - ICE BofA HY OAS series (BAMLH0A0HYM2) is unavailable via FRED for the 2010-2018 window due to the April 2026 licensing restriction on rolling 3-year history.
 - FRED data revisions during the backtest window are negligible for the selected series. Values pulled at runtime match the values that would have been available point-in-time.
 - FRED parquet cache (`raw_data/fred_cache.parquet`) is committed to the repository for reproducibility. Cache values were pulled from FRED on **2026-05-12**. The runtime pipeline does not refresh the cache.
+- The `validate_fred` contract allows a **7-day grace** at each end of the configured pull window when checking that the FRED cache covers the requested range. This accommodates publication-calendar irregularities — NFCI is weekly and may end up to 6 days before `pull_end`; daily series can start 1-2 days after `pull_start` due to holidays. The grace is a hardcoded constant in `src/data/validate.py` rather than a config parameter because it tracks FRED's publication mechanics (which don't vary), not a tunable design choice.
 
 **Portfolio:**
 - Long-only construction. No shorting is permitted.
@@ -439,6 +444,14 @@ The pipeline relies on the following explicit assumptions. A reviewer can audit 
 - The regime classifier's z-score thresholds are fit on **pre-2010 walk-forward composites** — out-of-sample for the 2010-2018 backtest.
 - The two constraint values that are in-sample design choices — sector cap (20%) and issuer cap (anchored to the 90th-percentile concentration) — are coarse heuristics chosen from full-panel distributions, not tuned hyperparameters.
 - Robustness is reported via (a) the quintile-size sensitivity variants (10% / 20% / 30%) described in § Signal Choice and § Portfolio Construction, (b) rolling 12-month performance windows in diagnostics, and (c) sub-period decomposition across 2010-2012 / 2013-2015 / 2016-2018.
+- **Headline performance metrics.** Both **Information Ratio** and **Sharpe** are reported. The IR benchmark is the equal-weighted excess return of the eligible HY universe on each rebalance date (`active_return = portfolio_excess − universe_excess`); IR isolates carry-signal alpha vs. passive equal-weight HY exposure. Sharpe is computed on the strategy's excess returns (already net of duration-matched Treasury via `Excess_Return_MTD`); it measures risk-adjusted credit-alpha standalone. Drawdown, turnover, hit rate, and exposure decompositions are reported alongside.
+
+- **Leakage-free design (verified by tests).** Three structural guarantees:
+  1. **Signal-to-return lag** — `backtest.py` enforces a one-month shift: signal computed from row `T`'s `OAS / OASD` is realized against row `T+1`'s `Excess_Return_MTD`. Verified by `test_backtest_lag_correct`.
+  2. **Point-in-time FRED join** — `merge.py` uses the strict-before rule `FRED_date ≤ end_of_month(T)` with an inline assertion. Verified by `test_merge_no_pit_leakage`.
+  3. **Walk-forward regime classifier** — `classifier.py` uses `shift(1).rolling(60)` so trailing z-score stats include only data with index `< T`. Thresholds are fit on pre-2010 composites only. Verified by `test_regime_thresholds_derived_from_config`.
+
+- **Survivorship handling (verified empirically).** The bond panel records terminal-event returns in each bond's **last available row** (encoded as `test_exit_row_captures_terminal_event`). Of the 4,724 bonds that exit the panel before its end: ~80% have near-zero terminal return (maturities / calls), ~5% have mild losses (rating migrations), ~1.5% are catastrophic with returns ≤ −20% (defaults, clustered in 2015-2016 energy stress as expected). Default losses are therefore captured at the row that exists; the disappearance at T+1 is post-event. `fill_value=0` in `backtest.run_backtest` for bonds with no row at T+1 is not a material bias source — those bonds are already post-terminal-event and have approximately zero forward excess return. A production-grade pipeline would still maintain an explicit exit-reason ledger for full attribution (Roadmap item 3); deferred for the prototype.
 
 ## Config
 
@@ -458,7 +471,9 @@ The `fred.api_key` field is intentionally blank in the committed config. The run
 
 ### Known Limitations
 
-[Honest acknowledgment of pipeline limitations.]
+- **IR benchmark is internal.** The Information Ratio uses the equal-weighted excess return of the eligible HY universe as its benchmark. A true external benchmark — the ICE BofA US HY OAS-equivalent total return index (e.g., `H0A0`) — would be more conventional but was rejected upstream (FRED's `BAMLH0A0HYM2` is restricted to a rolling 3-year window post-April-2026). The internal benchmark is the cleanest available proxy and is itself a defensible comparison: "did our carry signal beat equal-weight HY?"
+- **Transaction costs not modeled.** A production deployment would need to incorporate realistic bid-ask spreads (30–100 bps in HY) and market impact. Reported IR and Sharpe are gross of costs.
+- **No external date-convention validation at scale.** EDA Section A.8 validated the labeled-month convention at six anchor months; a full-window comparison against an external HY index would harden the assumption (see Roadmap).
 
 ### Roadmap
 

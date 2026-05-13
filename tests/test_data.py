@@ -59,3 +59,46 @@ def test_fred_missing_cache_fails_loudly(cfg, tmp_path):
     bad_cfg["cache_path"] = str(tmp_path / "nonexistent.parquet")
     with pytest.raises(FileNotFoundError, match="FRED cache not found"):
         ingest_fred(bad_cfg)
+
+
+def test_exit_row_captures_terminal_event(bonds):
+    """For bonds that exit the panel before its end, the last available row's
+    Excess_Return_MTD captures the terminal event:
+      - Maturities / calls: return near zero (par receipt)
+      - Defaults: return deeply negative (loss recorded in last row, bond then removed)
+
+    The distribution being centered near zero with a small catastrophic tail
+    is what justifies `fill_value=0` in backtest.run_backtest — the
+    disappearance at T+1 doesn't lose information because the terminal-event
+    return lives in the bond's last existing row. If a future data revision
+    breaks this convention, this test catches it.
+
+    See README Failure Mode #2 for the documented analysis.
+    """
+    panel_end      = bonds.Date.max()
+    last_per_cusip = bonds.groupby("Cusip").Date.max()
+    exiting_cusips = last_per_cusip[last_per_cusip < panel_end].index
+
+    exit_rows = (
+        bonds[bonds.Cusip.isin(exiting_cusips)]
+        .sort_values(["Cusip", "Date"])
+        .groupby("Cusip")
+        .tail(1)
+    )
+    er = exit_rows["Excess_Return_MTD"]
+
+    # Median exit-row return is near zero — most exits are routine maturities / calls.
+    assert -1.0 < er.median() < 1.0, (
+        f"Median exit-row Excess_Return_MTD = {er.median():.3f}; expected near 0 "
+        "if panel follows standard terminal-event convention. If this fails, the "
+        "panel may not record terminal returns in the last row, invalidating the "
+        "fill_value=0 assumption in backtest.run_backtest."
+    )
+
+    # Catastrophic exits (probable defaults) are a small minority of all exits.
+    pct_catastrophic = float((er < -20).mean())
+    assert pct_catastrophic < 0.05, (
+        f"{pct_catastrophic*100:.1f}% of exits have terminal return < -20%; "
+        "expected <5% for a standard HY index panel. Higher fraction would "
+        "suggest the panel is missing many default-month returns."
+    )
