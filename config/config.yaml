@@ -10,7 +10,7 @@ dates:
 
 # --- FRED data (cache download only; runtime reads parquet) ---
 fred:
-  api_key: ""                                       # Blank for security; required only by scripts/fred_download.py
+  api_key: ""                                    # Blank for security; required only by scripts/fred_download.py
   series:
     - VIXCLS
     - T10Y2Y
@@ -45,8 +45,7 @@ regime:
   method: "walk_forward_zscore"
   window_months: 60                                 # Rolling z-score window
   min_periods: 24                                   # Warmup before z-score defined
-  threshold_low:  -0.548                            # Pre-2010 composite 33rd percentile (out-of-sample)
-  threshold_high:  0.249                            # Pre-2010 composite 67th percentile
+  threshold_quantiles: [0.33, 0.67]    # Percentiles to fit on the pre-backtest composite
   threshold_fit_start: "2000-01-01"
   threshold_fit_end:   "2009-12-31"
   indicators:

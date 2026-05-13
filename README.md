@@ -35,44 +35,48 @@ The download script will fail with a clear error message if the API key is missi
 
 ## Repository Structure
 
+```
 project/
 ├── config/
-│   └── config.yaml                  # Pipeline parameters (dates, constraints, thresholds)
-├── logs/                            # Runtime logs from pipeline executions
+│   └── config.yaml                     # Pipeline parameters (dates, constraints, thresholds)
+├── logs/                               # Runtime logs from pipeline executions
 ├── notebooks/
-│   └── inspection.ipynb             # Exploratory data analysis
+│   └── inspection.ipynb                # Exploratory data analysis
 ├── outputs/
-│   ├── charts/                      # Generated PNG/PDF visualizations
-│   └── csv/                         # Generated results tables
+│   ├── charts/                         # Generated PNG/PDF visualizations
+│   └── csv/                            # Generated results tables
 ├── raw_data/
 │   ├── USHY_INDEX_20260301_part_1.csv
 │   └── fred_cache.parquet
 ├── scripts/
 │   └── fred_download.py                # Optional: rebuild FRED cache from API
 ├── src/
+│   ├── main.py                         # Pipeline orchestration entry point
 │   ├── data/
 │   │   ├── ingest_bonds.py
 │   │   ├── ingest_fred.py              # Pure cache loader (reads parquet)
 │   │   ├── merge.py
 │   │   └── validate.py
 │   ├── features/
-│   │   └── signal.py                # Credit signal calculation
+│   │   └── signal.py                   # Credit signal calculation
 │   ├── regime/
-│   │   └── classifier.py            # Regime classification logic
+│   │   └── classifier.py               # Regime classification logic
 │   ├── portfolio/
-│   │   └── construction.py          # Portfolio construction with constraints
+│   │   └── construction.py             # Portfolio construction with constraints
 │   ├── evaluation/
-│   │   ├── backtest.py              # Backtest engine
-│   │   └── diagnostics.py           # Performance diagnostics
+│   │   ├── backtest.py                 # Backtest engine
+│   │   └── diagnostics.py              # Performance diagnostics
 │   └── utils/
-│       └── logging_config.py        # Logging configuration
+│       └── logging_config.py           # Logging configuration
 ├── tests/
-│   ├── test_data.py                 # Data ingestion + validation tests
-│   ├── test_signal.py               # Signal calculation tests
-│   └── test_portfolio.py            # Portfolio construction tests
+│   ├── test_data.py                    # Data ingestion + validation tests
+│   ├── test_signal.py                  # Signal calculation tests
+│   ├── test_regime.py                  # Regime classifier tests
+│   └── test_portfolio.py               # Portfolio construction tests
 ├── .gitignore
 ├── README.md
 └── requirements.txt
+```
 
 ## Data
 
@@ -221,7 +225,7 @@ Each layer is importable as a package. All parameters live in `config/config.yam
 
 ### Module Specifications
 
-- `src/data/ingest_bonds.py` — Load AAA.csv, parse dates, drop schema-invalid rows, emit cleaned bond panel.
+- `src/data/ingest_bonds.py` — Load bond CSV from `config.data.bond_csv`, parse dates, shift to end-of-month convention (per A.8), apply locked ingestion drops (null OASD/DTS, fallen angels, D_NR, Government_Related, Agency).
 - `src/data/ingest_fred.py` — Pure cache loader. Loads FRED series from `raw_data/fred_cache.parquet`. Fails with a clear error if the cache file is missing.
 - `scripts/fred_download.py` — Optional utility for rebuilding the FRED parquet cache from API. Not part of the runtime pipeline. Requires `fred.api_key` configured in `config.yaml`. Fails loudly with a directive error if the key is missing.
 - `src/data/merge.py` — Align FRED series to monthly bond dates with explicit point-in-time controls. Aggregate daily/weekly FRED to monthly using last-known value before bond date.
@@ -295,17 +299,17 @@ The regime overlay does not change which bonds the signal picks. It changes **ho
 
 **Regime states:** Three discrete labels — `risk_on`, `neutral`, `risk_off`. Three states (rather than two or five) balance hierarchical clarity against over-fitting: binary regimes create whiplash at the threshold; five regimes force unnecessarily fine-grained allocation decisions the data cannot support.
 
-**Combination method (locked):** Walk-forward composite z-score with rolling 60-month window, monthly cadence.
+**Combination method (locked):** Walk-forward composite z-score with rolling window, monthly cadence. All parameters live in `config.regime` — window length, min_periods, fit window, fit quantiles, per-indicator sign flip, and allocation. The classifier computes thresholds at runtime from the pre-backtest slice, so any config change re-derives them automatically (no hardcoded values).
 
 For each rebalance date `T` (first of month), the classifier:
-1. Resamples each FRED series (`VIXCLS`, `T10Y2Y`, `NFCI`) to monthly cadence (last available value per month).
-2. Computes the mean and standard deviation of each series over the **trailing 60 months ending at `T-1`** (strictly past-looking; `min_periods=24`).
+1. Resamples each FRED series in `config.regime.indicators` to monthly cadence (last available value per month).
+2. Computes the mean and standard deviation of each series over the trailing `config.regime.window_months` ending at `T-1` (strictly past-looking; `min_periods` per config).
 3. Z-scores the current month's value against those trailing stats.
-4. Sign-flips `T10Y2Y` so all three z-scores move in the stress direction (high = risk_off).
+4. Sign-flips per indicator entry (`stress_low` negates the series so all three z-scores move in the stress direction).
 5. Averages the three z-scores → composite stress score.
-6. Applies fixed thresholds: composite < **−0.548** → `risk_on`, > **+0.249** → `risk_off`, else `neutral`.
+6. Applies thresholds derived at construction time from the composite values in `[config.regime.threshold_fit_start, config.regime.threshold_fit_end]` at the percentiles in `config.regime.threshold_quantiles`. Composite below the lower threshold → `risk_on`; above the upper → `risk_off`; otherwise `neutral`.
 
-The thresholds are the 33rd and 67th percentiles of the **pre-2010 walk-forward composite series** (96 monthly observations from 2002 to 2009 after warmup). Fitting on pre-backtest data means the thresholds are out-of-sample for the 2010-2018 backtest — no in-sample look-ahead at the threshold-selection step.
+Fitting on the pre-backtest slice makes the thresholds out-of-sample for the 2010-2018 backtest. On the current configuration the runtime values resolve to approximately **−0.548 / +0.249**, but the values adapt automatically to any change in pull window, z-score window, fit-window endpoints, or fit quantiles.
 
 **Resulting regime frequency on backtest (2010-2018):** ~47% neutral, ~27% risk_off, ~26% risk_on. Materially better resolution than vote-based (~61% neutral).
 
@@ -442,7 +446,7 @@ All pipeline parameters live in `config/config.yaml`. The top-level structure:
 
 - `dates` — Backtest start, end, rebalance frequency
 - `signal` — Quintile cutoff, weighting scheme
-- `regime` — Combination method, allocation scaling (100/66/33), thresholds
+- `regime` — Combination method, allocation scaling (100/66/33), threshold-fit rule (quantiles + fit window endpoints)
 - `portfolio` — Constraint values (issuer cap, sector cap, rating bucket limits)
 - `data` — Universe filters (fallen angels, OAS handling, maturity threshold)
 - `fred` — API key (optional, used only by `fred_download.py`)
