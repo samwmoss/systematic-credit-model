@@ -35,8 +35,8 @@ signal:
   name: "oas_oasd_carry"
   numerator: "OAS"
   denominator: "OASD"
-  primary_quintile: 0.20                            # Headline backtest cutoff
-  sensitivity_quintiles: [0.10, 0.20, 0.30]         # All three reported for robustness (not selection)
+  primary_top_pct: 0.20                             # Headline backtest cutoff (top 20% of eligible universe by carry signal)
+  sensitivity_top_pcts: [0.10, 0.20, 0.30]          # All three reported for robustness (not selection); strict naming — only 0.20 is a quintile, 0.10 is a decile, 0.30 has no standard fractile name
   weighting: "inverse_dts"                          # 1/DTS within selected universe, normalized to sum to 1
   lag_months: 1                                     # Signal inputs at row T predict return at row T+1 (per A.8)
 

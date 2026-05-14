@@ -4,34 +4,33 @@
 
 ## Overview
 
-[Pipeline purpose, scope, and high-level approach.]
-Effectively:
-1 - What the pipeline does
-2 - Why THIS design
-3 - Why THIS data
-4 - What this is not
+1. **What the pipeline does.** Ranks US High Yield bonds by OAS/OASD carry on each monthly rebalance date, constructs a long-only portfolio under explicit issuer (5%) and sector (20%) caps with inverse-DTS weighting, scales total deployment by a composite-z-score regime classifier over VIX / 10Y-2Y / NFCI, and runs a 2010-2018 backtest with full diagnostics (Sharpe, Sortino, Calmar, IR, drawdown, turnover, exposure, per-regime decomposition).
+
+2. **Why this design.** One signal with clear economic intuition (spread compensation per unit of spread risk), one regime overlay for portfolio-level position sizing, two explicit risk controls, and a single-command run. Engineering quality and defensibility were prioritized over alpha maximization per the assignment's stated grading criteria. Full design rationale and considered-and-rejected alternatives appear in the BRD / FRD / TRD sections below.
+
+3. **Why this data.** The bond panel was provided. FRED macro series (VIXCLS, T10Y2Y, NFCI) were selected from a candidate set of seven for full coverage of the 2010-2018 backtest window, near-zero publication lag (supports point-in-time use), and orthogonal coverage of macro stress dimensions. The FRED parquet cache is committed to the repository so the entire pipeline reproduces from this folder alone — no network access or API key required.
+
+4. **What this is not.** Not a deployment-ready strategy. Transaction costs are not modeled (HY bid-ask is materially non-zero), the IR benchmark is internal rather than an external HY index (FRED licensing changes restricted access to BAMLH0A0HYM2 in April 2026), and the prototype has no live-execution layer. The Roadmap section below itemizes what would need to harden before this could approach a live process.
 
 ## Quick Start
 
-### Default run (no network or API key required)
-
-```bash
-pip install -r requirements.txt
-python -m src.main
-```
-
-The pipeline runs end-to-end using the committed FRED parquet cache and provided bond panel. No external data is fetched.
-
 ### Optional: Rebuild FRED cache
 
-The repository ships with `raw_data/fred_cache.parquet` (VIXCLS, T10Y2Y, NFCI). The pipeline reads from this cache and does not require a FRED API key.
+The repository ships with `raw_data/fred_cache.parquet` (VIXCLS, T10Y2Y, NFCI), the pipeline reads from this cache and does not require a FRED API key. Skip this section unless you want to refresh the macro data from a live FRED pull.
 
 To rebuild the cache from the FRED API:
 1. Obtain a free API key from https://fred.stlouisfed.org/
 2. Add the key to `config/config.yaml` under `fred.api_key`
 3. Run `python scripts/fred_download.py`
+The download script fails with a clear, directive error message if the API key is missing or invalid.
 
-The download script will fail with a clear error message if the API key is missing or invalid.
+### Default run (no network or API key required)
+
+```bash
+pip install -r requirements.txt
+pytest -v
+python -m src.main
+```
 
 ## Repository Structure
 
@@ -43,8 +42,18 @@ project/
 ├── notebooks/
 │   └── inspection.ipynb                # Exploratory data analysis
 ├── outputs/
-│   ├── charts/                         # Generated PNG/PDF visualizations
-│   └── csv/                            # Generated results tables
+│   ├── charts/
+│   │   ├── cumulative_returns.png      # Top-pct sensitivity overlay vs benchmark
+│   │   ├── drawdown.png                # Drawdown curves overlaid for all top-pct cutoffs + benchmark
+│   │   ├── risk_adjusted_comparison.png  # 2x2 small-multiples: ann_return / Sharpe / Sortino / Calmar across top-pct cutoffs + benchmark
+│   │   ├── regime_timeline.png         # Regime labels with stress-window shading
+│   │   └── rolling_ir.png              # 2-panel: rolling Sharpe (cutoffs + benchmark) + rolling IR (cutoffs only)
+│   └── csv/
+│       ├── summary_stats.csv           # IR, Sharpe, Sortino, Calmar, max DD, hit rate per top-pct cutoff + benchmark
+│       ├── regime_stats.csv            # Per-(series, regime) Sharpe / Sortino / Calmar / vol / DD decomposition
+│       ├── subperiod_stats.csv         # post-GFC / low-vol / energy-Q4 splits
+│       ├── exposure_decomp.csv         # Sector + rating exposure per top-pct cutoff
+│       └── monthly_returns.csv         # Date × (portfolio_topX, benchmark, allocation, regime)
 ├── raw_data/
 │   ├── USHY_INDEX_20260301_part_1.csv
 │   └── fred_cache.parquet
@@ -132,7 +141,7 @@ The regime classifier uses three publicly available macro indicators from FRED, 
 - `DTS` — Duration Times Spread (`OASD × OAS`). Risk-budgeted spread exposure.
 - `Yield_To_Worst` — Yield under worst-case call schedule.
 - `Total_Return_MTD` — Monthly total return.
-- `Excess_Return_MTD` — Return over duration-matched Treasury, **realized during the calendar month identified by the `Date` label** (see above). Confirmed by EDA cross-reference against external HY index returns at six anchor months (e.g., row dated `2011-08-01` shows -4.14% mean excess return, matching August 2011's HY selloff). **Backtest dependent variable; signal inputs at row T predict return at row T+1.**
+- `Excess_Return_MTD` — Return over duration-matched Treasury, **realized during the calendar month identified by the `Date` label** (see above). Confirmed by EDA cross-reference against external HY index directional returns at six anchor months (e.g., row dated `2011-08-01` shows -4.14% Total Return, matching August 2011's HY selloff). **Backtest dependent variable; signal inputs at row T predict return at row T+1.**
 
 ### Data Quality Notes
 
@@ -197,7 +206,7 @@ The system must perform the following functions:
 - **Compute the credit signal** at the bond level on each rebalance date. Rank bonds within the eligible universe.
 - **Construct the portfolio** subject to at least two explicit constraints (issuer cap, sector cap, rating bucket). Scale exposure based on regime classification.
 - **Run the backtest** as a monthly-rebalance loop over the 2010-2018 window. Compute portfolio excess returns using `Excess_Return_MTD` as the dependent variable.
-- **Compute diagnostics:** **Information Ratio** and **Sharpe** of portfolio excess returns, drawdown, turnover, exposure decomposition (sector and rating), rolling 12-month windows, sub-period decomposition, and quintile-size sensitivity comparison.
+- **Compute diagnostics:** **Information Ratio**, **Sharpe**, **Sortino**, and **Calmar** of portfolio excess returns, drawdown, turnover, exposure decomposition (sector and rating), rolling 12-month windows, sub-period decomposition, per-(series, regime) risk decomposition, and top-pct sensitivity comparison.
 - **Log all runs** with structured records of data loaded, rows processed, missing data handled, and outputs generated. Logs persist to `logs/`.
 - **Produce outputs** to `outputs/` — charts as PNG, tabular results as CSV.
 - **Execute end-to-end from a single command.** No manual intervention required between data ingestion and output generation.
@@ -226,6 +235,7 @@ Each layer is importable as a package. All parameters live in `config/config.yam
 
 ### Module Specifications
 
+- `src/main.py` — Pipeline orchestration entry point. `python -m src.main` runs the full pipeline end-to-end through 8 stages: bond ingestion + validation, FRED ingestion + validation, point-in-time merge + validation, regime classification, signal computation (diagnostic visibility), portfolio construction per sensitivity top-pct cutoff, backtest per sensitivity top-pct cutoff, and diagnostics output. Returns a dict of artifacts for inspection.
 - `src/data/ingest_bonds.py` — Load bond CSV from `config.data.bond_csv`, parse dates, shift to end-of-month convention (per A.8), apply locked ingestion drops (null OASD/DTS, fallen angels, D_NR, Government_Related, Agency).
 - `src/data/ingest_fred.py` — Pure cache loader. Loads FRED series from `raw_data/fred_cache.parquet`. Fails with a clear error if the cache file is missing.
 - `scripts/fred_download.py` — Optional utility for rebuilding the FRED parquet cache from API. Not part of the runtime pipeline. Requires `fred.api_key` configured in `config.yaml`. Fails loudly with a directive error if the key is missing.
@@ -235,7 +245,7 @@ Each layer is importable as a package. All parameters live in `config/config.yam
 - `src/regime/classifier.py` — Apply rule-based thresholds across VIX, T10Y2Y, NFCI to produce monthly regime label.
 - `src/portfolio/construction.py` — Apply universe filter (`OASD > 0`, `DTS > 0`), delegate signal selection + inverse-DTS weighting (`compute_signal`), enforce issuer (`Ticker`) and sector (`Class3`) caps **iteratively until each cap is honored exactly within float precision**. Returns position weights summing to 1.0 per Date (full deployment); regime scaling is applied later in the backtest layer.
 - `src/evaluation/backtest.py` — Monthly-rebalance loop, portfolio return computation, holdings tracking.
-- `src/evaluation/diagnostics.py` — Information Ratio + Sharpe vs. the equal-weighted eligible HY universe, drawdown, turnover, sector/rating exposure decomposition, rolling 12-month performance, sub-period decomposition (2010-12 / 2013-15 / 2016-18). Outputs PNGs to `outputs/charts/` and CSVs to `outputs/csv/`.
+- `src/evaluation/diagnostics.py` — Information Ratio, Sharpe, **Sortino**, and **Calmar** vs. the equal-weighted eligible HY universe; drawdown, turnover, sector/rating exposure decomposition; rolling 12-month performance; sub-period decomposition (2010-12 / 2013-15 / 2016-18); **per-(series, regime) risk decomposition** (Sharpe / Sortino / Calmar / vol / drawdown for each top-pct cutoff and benchmark, broken out by regime). Outputs **5 PNGs** to `outputs/charts/` and **5 CSVs** to `outputs/csv/`.
 - `src/utils/logging_config.py` — Centralized logger configuration; file and console handlers.
 
 ### Technology Stack
@@ -292,6 +302,8 @@ The regime overlay does not change which bonds the signal picks. It changes **ho
 - **Multi-factor signal** (carry + momentum + quality). Rejected — brief specifies "one systematic signal." Scope discipline prioritized.
 - **Machine-learning signal.** Rejected — see FRD § Considered and Rejected. Black-box models lack the economic interpretability a PM needs.
 
+**Note on naming.** This pipeline was originally framed using "quintile" terminology — `primary_quintile = 0.20` with sensitivity variants `[0.10, 0.20, 0.30]` colloquially referred to as "quintile cutoffs." On second-pass review the term was imprecise: a quintile is strictly the top 20% (one of five equal groups), so 0.10 is a decile and 0.30 has no standard fractile name. The config keys, code parameters, function signatures, and CSV column headers were renamed end-to-end to **top-pct** (`primary_top_pct`, `sensitivity_top_pcts`, `top_pct=q` parameter, `top10` / `top20` / `top30` series labels). Pipeline behavior is unchanged — `top_pct = 0.20` selects the same set of bonds the prior `primary_quintile = 0.20` did. The rename is purely terminological. The original "quintile" framing is preserved in this note rather than scattered through the codebase as a known imprecision.
+
 ### Regime Classifier
 
 **Purpose:** Convert monthly macro indicators into a single regime label that scales total deployed capital. The classifier does not change which bonds the signal picks — it changes how much portfolio-level exposure is deployed.
@@ -325,7 +337,7 @@ Fitting on the pre-backtest slice makes the thresholds out-of-sample for the 201
 
 ### Portfolio Construction
 
-**Strategy:** Long-only portfolio of US High Yield bonds, monthly rebalance. Holdings are determined by the carry signal (see § Signal Choice), weighted within the long quintile, and scaled at the portfolio level by the regime classifier (see § Regime Classifier).
+**Strategy:** Long-only portfolio of US High Yield bonds, monthly rebalance. Holdings are determined by the carry signal (see § Signal Choice), weighted within the selected top-X% set, and scaled at the portfolio level by the regime classifier (see § Regime Classifier).
 
 **Universe Definition.** Before signal ranking, the eligible universe is filtered by:
 - Required fields present on rebalance date: `OAS`, `OASD`, `DTS`, `Years_To_Maturity`, `Eff_Rating_Group`, `Excess_Return_MTD`
@@ -334,17 +346,17 @@ Fitting on the pre-backtest slice makes the thresholds out-of-sample for the 201
 
 **Selection:** Rank eligible bonds by `OAS / OASD` on each rebalance date. The primary case longs the top 20%; the backtest also runs top 10% and top 30% as sensitivity variants. All three use identical regime, weighting, and constraint logic — only the universe cutoff changes.
 
-**Weighting:** Within the long quintile, weight each bond proportional to `1 / DTS` so each position contributes approximately equal risk to the portfolio. Weights normalize to sum to 1 within the quintile before regime scaling.
+**Weighting:** Within the selected top-X% set, weight each bond proportional to `1 / DTS` so each position contributes approximately equal risk to the portfolio. Weights normalize to sum to 1 within the selected set before regime scaling.
 
 **Constraints:**
-- **Issuer cap** — Maximum **5% portfolio weight per issuer** (enforced via `Ticker`). Anchored to the 90th percentile of bonds-per-issuer-per-month in the panel (≈ 4 bonds out of an ~80-bond long quintile under the primary cutoff).
+- **Issuer cap** — Maximum **5% portfolio weight per issuer** (enforced via `Ticker`). Anchored to the 90th percentile of bonds-per-issuer-per-month in the panel (≈ 4 bonds out of an ~80-bond selected set under the primary 20% cutoff).
 - **Sector cap** — Maximum **20% portfolio weight per sector** (enforced via `Class3`). Set above the 18% mean for Consumer_Cyclical so it binds only during sector-concentration events (e.g., Energy 2015-16).
 - **Rating bucket exposure** — No explicit CCC max or BB min constraint. Fallen angels (BBB and above) are already excluded at ingestion; the eligible universe is B / BB / CCC only. The signal naturally tilts toward CCC under risk-on; the regime classifier handles aggregate risk-taking through position-scaling, not bucket-level filtering.
 
 **Constraint Enforcement Order (within `construction.py`):**
 1. Apply universe filter (`OASD > 0`, `DTS > 0`).
-2. Compute signal and select top quintile (delegated to `compute_signal`).
-3. Apply inverse-DTS weighting within the quintile (also from `compute_signal`).
+2. Compute signal and select top X% (delegated to `compute_signal`).
+3. Apply inverse-DTS weighting within the selected set (also from `compute_signal`).
 4. Enforce caps in the order configured in `portfolio.constraint_order` (default: issuer cap → sector cap). For each cap: **iteratively** — while any group's summed weight exceeds the cap, trim the lowest-signal bonds within violating groups until each group sum is at or below the cap, then rescale all surviving bonds in the Date so weights re-sum to 1.0 (full deployment). Iteration continues until no group violates the cap, typically within 2–5 passes; convergence is mathematically guaranteed for any cap > 0 with a feasible universe. The cap value (e.g., 20% sector) is therefore honored exactly within float precision — there is no "single-pass artifact."
 
 Regime scaling is applied at the backtest layer, not in construction (see Rebalance Logic).
@@ -352,17 +364,16 @@ Regime scaling is applied at the backtest layer, not in construction (see Rebala
 **Rebalance Logic:**
 - **Frequency:** Monthly.
 - **Timing:** A rebalance for month `T+1` uses bond row `T` (end-of-month-`T` snapshot — see Variable Map and Leakage Checks + Merge notes) and FRED data with date `≤ end_of_month(T)`. Signal inputs `OAS_T` / `OASD_T` produce the ranking; positions are held during month `T+1`; realized return is row `T+1`'s `Excess_Return_MTD`. Both the bond row and the matched FRED value become knowable on the first business day of month `T+1`.
-- **Cash handling:** Capital not deployed under neutral or risk-off regimes is held in a duration-matched Treasury proxy. Because the backtest reports excess return (each bond's Excess_Return_MTD is already net of its duration-matched Treasury), the cash component's contribution to portfolio excess return is zero by construction. The strategy's reported PnL therefore reflects credit-signal excess return scaled by regime deployment, with no rate contribution from idle capital.
 
 **Considered and rejected:**
 
-- **Equal-weighted within quintile.** Rejected — see TRD § Considered and Rejected. Inverse-DTS weighting equalizes per-bond risk contribution; equal weighting lets high-DTS bonds dominate portfolio risk.
+- **Equal-weighted within the selected top-X% set.** Rejected — see TRD § Considered and Rejected. Inverse-DTS weighting equalizes per-bond risk contribution; equal weighting lets high-DTS bonds dominate portfolio risk.
 - **Market-cap weighting.** Rejected — would tilt the portfolio toward larger issuers regardless of signal strength. The signal's purpose is to identify mispriced bonds, not to track issuer size.
 - **Issuer cap at Cusip level.** Rejected — see FRD § Considered and Rejected. Multi-bond issuers would defeat the concentration limit.
 - **Sector cap using Class2 (issuer type).** Rejected — Class2 distinguishes Industrial / Financial / Utility, which is too coarse to control sector concentration meaningfully. Class3 (19 sectors) provides actionable granularity.
 - **Long/short construction.** Rejected — see BRD § Considered and Rejected.
 - **Multi-period optimization.** Rejected — adds scope for marginal benefit in a 1-week build. Single-period rebalance is the standard for carry strategies and easier to defend.
-- **Cash held at zero return.** Rejected — understates realistic cash performance; the duration-matched T-bill proxy more accurately reflects what an un-deployed capital share would earn in practice.
+- **Cash held at zero return.**  Rejected — Excess_Return_MTD is already net of the duration-matched Treasury, so deploying a T-bill yield contribution from un-deployed capital would double-count the rate leg. Treating the cash share as zero excess return is the consistent choice under this accounting.
 
 ### Failure Modes + Detection
 
@@ -443,8 +454,8 @@ The pipeline relies on the following explicit assumptions. A reviewer can audit 
 - The carry signal (`OAS / OASD`) and inverse-DTS weighting are closed-form rules with **no fitted parameters** — there is nothing to overfit, and no formal in-sample / out-of-sample backtest split is required. Universe filters and rating exclusions are definitional, not learned.
 - The regime classifier's z-score thresholds are fit on **pre-2010 walk-forward composites** — out-of-sample for the 2010-2018 backtest.
 - The two constraint values that are in-sample design choices — sector cap (20%) and issuer cap (anchored to the 90th-percentile concentration) — are coarse heuristics chosen from full-panel distributions, not tuned hyperparameters.
-- Robustness is reported via (a) the quintile-size sensitivity variants (10% / 20% / 30%) described in § Signal Choice and § Portfolio Construction, (b) rolling 12-month performance windows in diagnostics, and (c) sub-period decomposition across 2010-2012 / 2013-2015 / 2016-2018.
-- **Headline performance metrics.** Both **Information Ratio** and **Sharpe** are reported. The IR benchmark is the equal-weighted excess return of the eligible HY universe on each rebalance date (`active_return = portfolio_excess − universe_excess`); IR isolates carry-signal alpha vs. passive equal-weight HY exposure. Sharpe is computed on the strategy's excess returns (already net of duration-matched Treasury via `Excess_Return_MTD`); it measures risk-adjusted credit-alpha standalone. Drawdown, turnover, hit rate, and exposure decompositions are reported alongside.
+- Robustness is reported via (a) the top-pct sensitivity variants (top 10% / top 20% / top 30%) described in § Signal Choice and § Portfolio Construction, (b) rolling 12-month performance windows in diagnostics, and (c) sub-period decomposition across 2010-2012 / 2013-2015 / 2016-2018.
+- **Headline performance metrics.** Four risk-adjusted measures are reported: **Information Ratio**, **Sharpe**, **Sortino** (downside-volatility Sharpe with MAR=0), and **Calmar** (`ann_return / |max_drawdown|`). IR uses the equal-weighted excess return of the eligible HY universe on each rebalance date (`active_return = portfolio_excess − universe_excess`) and isolates carry-signal alpha vs. passive equal-weight HY exposure. Sharpe is computed on the strategy's excess returns (already net of duration-matched Treasury via `Excess_Return_MTD`) and measures risk-adjusted credit-alpha against full-distribution volatility. Sortino measures the same against downside-only volatility, capturing the regime overlay's left-tail truncation. Calmar measures return per unit of worst-case loss — the relevant metric for a drawdown-controlled strategy. Drawdown, turnover, hit rate, and exposure decompositions are reported alongside, and per-(series, regime) decomposition is exported in `regime_stats.csv`.
 
 - **Leakage-free design (verified by tests).** Three structural guarantees:
   1. **Signal-to-return lag** — `backtest.py` enforces a one-month shift: signal computed from row `T`'s `OAS / OASD` is realized against row `T+1`'s `Excess_Return_MTD`. Verified by `test_backtest_lag_correct`.
@@ -458,7 +469,7 @@ The pipeline relies on the following explicit assumptions. A reviewer can audit 
 All pipeline parameters live in `config/config.yaml`. The top-level structure:
 
 - `dates` — Backtest start, end, rebalance frequency
-- `signal` — Quintile cutoff, weighting scheme
+- `signal` — Top-pct cutoff (`primary_top_pct` + `sensitivity_top_pcts`), weighting scheme, signal-to-return lag
 - `regime` — Combination method, allocation scaling (100/66/33), threshold-fit rule (quantiles + fit window endpoints)
 - `portfolio` — Constraint values (issuer cap, sector cap, rating bucket limits)
 - `data` — Universe filters (fallen angels, OAS handling, maturity threshold)
@@ -479,7 +490,7 @@ The `fred.api_key` field is intentionally blank in the committed config. The run
 
 Given more time or production scope, the following extensions would meaningfully strengthen the pipeline. Each was scoped out of the initial build to maintain delivery discipline.
 
-1. **Return-attribution validation.** Cross-reference our cross-sectional mean `Excess_Return_MTD` per bond date against an external HY index excess-return benchmark (e.g., ICE BofA US HY Master II) to confirm the date convention at scale. EDA confirmed the labeled-month convention on three anchor months; a full-window comparison would harden the assumption.
+1. **Return-attribution validation.** Cross-reference our cross-sectional mean `Excess_Return_MTD` per bond date against an external HY index excess-return benchmark (e.g., ICE BofA US HY Master II) to confirm the date convention at scale. EDA confirmed the labeled-month convention on six anchor months; a full-window comparison would harden the assumption.
 
 2. **FRED publication-lag monitoring.** Track the join lag distribution per series over time. The pipeline's PIT join uses the strict-before rule with no enforced maximum lag; in production, a per-series lag SLA (e.g., NFCI lag must be ≤ 7 days) would surface FRED publication outages before they contaminate regime labels.
 
@@ -487,8 +498,8 @@ Given more time or production scope, the following extensions would meaningfully
 
 4. **Stale-OAS production filter.** EDA's stale-OAS probe (1.75% baseline rate) is currently a detection mechanism only. Promote it to an active universe filter: exclude bonds with `|ΔOAS| < 1 bp` for N consecutive months from the eligible universe at the rebalance, on the grounds that their OAS is matrix-priced and signal-contaminating.
 
-5. **Top-quintile composition stability tracking.** EDA measured 87% retention month-over-month in the top OAS/OASD quintile (~13% monthly turnover). In production, monitor this metric in real time — a sudden drop in retention would indicate either a regime shift in the carry signal's bond selection or a data-quality break.
+5. **Top-X% composition stability tracking.** EDA measured 87% retention month-over-month in the top OAS/OASD selection (~13% monthly turnover at the primary 20% cutoff). In production, monitor this metric in real time — a sudden drop in retention would indicate either a regime shift in the carry signal's bond selection or a data-quality break.
 
 ## Dependencies
 
-[Reference to requirements.txt and any external data dependencies.]
+Runtime dependencies are pinned in `requirements.txt` (pandas, numpy, pyarrow, pyyaml, matplotlib, fredapi, pytest). The FRED parquet cache (`raw_data/fred_cache.parquet`) is committed for full reproducibility from the repo alone — `python -m src.main` requires no network access or API key.

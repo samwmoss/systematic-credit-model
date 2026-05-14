@@ -9,7 +9,7 @@ applied to row T+1's realized Excess_Return_MTD. This is the line of defense
 against the leakage failure mode #4.
 
 No file I/O. Plots / CSVs are produced by `diagnostics.py` from this module's
-output dict. Multi-quintile sensitivity loop lives in `main.py`.
+output dict. Multi-top-pct sensitivity loop lives in `main.py`.
 """
 import logging
 import pandas as pd
@@ -29,8 +29,8 @@ def run_backtest(
     Args:
         merged: Bond panel + FRED columns (output of `merge_bonds_fred`). Used
             for next-month return lookup and the equal-weighted benchmark.
-        portfolio: Pre-built portfolio (output of `build_portfolio`). One quintile
-            sensitivity at a time. Required cols: Date, Cusip, weight.
+        portfolio: Pre-built portfolio (output of `build_portfolio`). One top-pct
+            cutoff at a time. Required cols: Date, Cusip, weight.
         regime_out: Output of `classify_regimes`. Uses `regime_out["allocations"]`
             and `regime_out["labels"]`.
         dates_cfg: The `dates` section of config.yaml. Trims the rebalance

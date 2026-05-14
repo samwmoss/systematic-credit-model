@@ -36,7 +36,7 @@ def build_portfolio(
     panel: pd.DataFrame,
     signal_cfg: dict,
     portfolio_cfg: dict,
-    quintile: float | None = None,
+    top_pct: float | None = None,
 ) -> pd.DataFrame:
     """Build the long-only portfolio per locked design.
 
@@ -45,8 +45,8 @@ def build_portfolio(
         signal_cfg: The `signal` section of config.yaml.
         portfolio_cfg: The `portfolio` section of config.yaml. Required keys:
             issuer_cap, sector_cap, issuer_field, sector_field, constraint_order.
-        quintile: Cutoff override for sensitivity runs. Defaults to
-            signal_cfg["primary_quintile"].
+        top_pct: Top-X% cutoff override for sensitivity runs (e.g. 0.10, 0.30).
+            Defaults to signal_cfg["primary_top_pct"].
 
     Returns:
         DataFrame of held bonds with all original columns plus `carry` and
@@ -64,14 +64,14 @@ def build_portfolio(
     constraint_order = portfolio_cfg["constraint_order"]
 
     log.info(
-        f"Building portfolio: quintile={quintile or signal_cfg['primary_quintile']}, "
+        f"Building portfolio: top_pct={top_pct or signal_cfg['primary_top_pct']}, "
         f"issuer_cap={issuer_cap}, sector_cap={sector_cap}"
     )
 
     eligible = _filter_universe(panel)
     log.info(f"  universe: {len(eligible):,} bond-date rows")
 
-    selected = compute_signal(eligible, signal_cfg, quintile=quintile)
+    selected = compute_signal(eligible, signal_cfg, top_pct=top_pct)
 
     cap_specs = {
         "issuer_cap": (issuer_field, issuer_cap),

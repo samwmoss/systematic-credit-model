@@ -17,13 +17,13 @@ log = logging.getLogger(__name__)
 def compute_signal(
     panel: pd.DataFrame,
     signal_cfg: dict,
-    quintile: float | None = None,
+    top_pct: float | None = None,
 ) -> pd.DataFrame:
-    """Rank bonds by carry per date, select top quintile, weight by inverse-DTS.
+    """Rank bonds by carry per date, select top X%, weight by inverse-DTS.
 
     Per-date workflow:
       1. carry = panel[numerator] / panel[denominator]   (typically OAS / OASD)
-      2. Rank descending; select top max(1, round(quintile * N)) bonds per Date
+      2. Rank descending; select top max(1, round(top_pct * N)) bonds per Date
       3. Weight by 1 / DTS; normalize per Date to sum to 1
 
     Args:
@@ -32,9 +32,9 @@ def compute_signal(
             Required columns: Date, Cusip, the signal_cfg numerator/denominator,
             and DTS for inverse-DTS weighting.
         signal_cfg: The `signal` section of config.yaml. Keys used:
-            numerator, denominator, weighting, primary_quintile.
-        quintile: Cutoff override for sensitivity runs (e.g. 0.10, 0.30).
-            Defaults to signal_cfg["primary_quintile"].
+            numerator, denominator, weighting, primary_top_pct.
+        top_pct: Top-X% cutoff override for sensitivity runs (e.g. 0.10, 0.30).
+            Defaults to signal_cfg["primary_top_pct"].
 
     Returns:
         DataFrame of selected bonds with all original columns plus:
@@ -47,11 +47,11 @@ def compute_signal(
     numerator   = signal_cfg["numerator"]
     denominator = signal_cfg["denominator"]
     weighting   = signal_cfg["weighting"]
-    if quintile is None:
-        quintile = signal_cfg["primary_quintile"]
+    if top_pct is None:
+        top_pct = signal_cfg["primary_top_pct"]
 
     log.info(
-        f"Computing signal: {numerator}/{denominator}  cutoff={quintile}  weighting={weighting}"
+        f"Computing signal: {numerator}/{denominator}  top_pct={top_pct}  weighting={weighting}"
     )
 
     work = panel.copy()
@@ -59,7 +59,7 @@ def compute_signal(
 
     # Vectorized top-N selection per Date.
     n_per_date = work.groupby("Date")["carry"].transform("count")
-    cutoff_n   = (n_per_date * quintile).round().clip(lower=1).astype(int)
+    cutoff_n   = (n_per_date * top_pct).round().clip(lower=1).astype(int)
     rank_in_d  = work.groupby("Date")["carry"].rank(method="first", ascending=False)
     selected   = work[rank_in_d <= cutoff_n].copy()
 

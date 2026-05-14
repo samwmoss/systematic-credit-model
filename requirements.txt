@@ -1,0 +1,19 @@
+# Systematic Credit Signal & Portfolio Prototype
+# Python 3.12. Versions reflect the environment in which the pipeline was
+# developed and end-to-end tested. Minimum compatible versions are listed;
+# tested versions are pinned in comments for full reproducibility.
+
+# --- Data + numerics ---
+pandas>=2.2,<3        # tested: 2.3.3
+numpy>=1.26,<3        # tested: 2.0.0
+pyarrow>=14.0         # tested: 23.0.1 — parquet backend for FRED cache
+
+# --- Config + plotting ---
+pyyaml>=6.0           # tested: 6.0.2 — config.yaml loader
+matplotlib>=3.7       # tested: 3.10.8 — headless ("Agg") for diagnostics PNGs
+
+# --- FRED API (optional: scripts/fred_download.py only; runtime uses parquet cache) ---
+fredapi>=0.5          # tested: 0.5.2
+
+# --- Testing ---
+pytest>=7.0           # tested: 9.0.3

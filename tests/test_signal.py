@@ -38,8 +38,8 @@ def signal_primary(cfg, eligible) -> pd.DataFrame:
 
 
 def test_signal_cutoff_size(signal_primary, eligible, cfg):
-    """Selected count per date = max(1, round(N * primary_quintile))."""
-    q = cfg["signal"]["primary_quintile"]
+    """Selected count per date = max(1, round(N * primary_top_pct))."""
+    q = cfg["signal"]["primary_top_pct"]
     selected_per_date = signal_primary.groupby("Date").size()
     eligible_per_date = eligible.groupby("Date").size()
     expected = (eligible_per_date * q).round().clip(lower=1).astype(int)

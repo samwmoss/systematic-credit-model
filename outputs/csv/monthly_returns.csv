@@ -1,4 +1,4 @@
-Date,portfolio_q10,portfolio_q20,portfolio_q30,benchmark,allocation,regime
+Date,portfolio_top10,portfolio_top20,portfolio_top30,benchmark,allocation,regime
 2010-02-28,0.444255,0.379386,0.269461,-0.228851,1.000000,risk_on
 2010-03-31,1.677303,2.030584,1.963811,3.821757,1.000000,risk_on
 2010-04-30,0.839722,0.912728,0.978030,1.818619,1.000000,risk_on
